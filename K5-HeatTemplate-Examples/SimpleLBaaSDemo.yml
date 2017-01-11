@@ -1,0 +1,327 @@
+heat_template_version: 2013-05-23
+# Author: Graham Land
+# Date: 3/1/2017
+# Purpose:
+#
+# This stack demonstrates how to create two servers and then balance a http service across these servers
+
+# Twitter: @allthingsclowd
+# Blog: https://allthingscloud.eu
+
+description: This stack demonstrates how to create two servers and then balance a http service across these servers
+
+# Input parameters
+parameters:
+  image:
+    type: string
+    label: Image name or ID
+    description: Image to be used for compute instance
+    default: "Ubuntu Server 14.04 LTS (English) 01"
+  flavor:
+    type: string
+    label: Flavor
+    description: Type of instance (flavor) to be used
+    default: "P-1"
+  key_az_2:
+    type: string
+    label: Key name
+    description: Name of key-pair to be used for compute instance
+    default: "demostack"
+  public_net_az2:
+    type: string
+    label: external network ID
+    description: Public network
+    default: "d730db50-0e0c-4790-9972-1f6e2b8c4915"
+  az2:
+    type: string
+    label: Availability Zone
+    description: Region AZ to use
+    default: "uk-1b"
+  ext_router_az2:
+    type: string
+    label: External Router
+    description: Router with external access for global ip allocation
+    default: "f25f3d89-c5d6-4975-8eaa-51f67ad54789"
+
+
+# K5 Infrastructure resources to be built
+resources:
+
+  # Create a private network in availability zone 1
+  private_net_az2:
+    type: OS::Neutron::Net
+    properties:
+      availability_zone: { get_param: az2 }
+      name: "private_net_az2"
+
+  # Create a new subnet on the private network
+  private_subnet_az2:
+    type: OS::Neutron::Subnet
+    depends_on: private_net_az2
+    properties:
+      availability_zone: { get_param: az2 }
+      name: "private_subnet_az2"
+      network_id: { get_resource: private_net_az2 }
+      cidr: "10.11.200.0/24"
+      gateway_ip: "10.11.200.254"
+      allocation_pools:
+        - start: "10.11.200.100"
+          end: "10.11.200.150"
+      dns_nameservers: ["62.60.42.9", "62.60.42.10"]
+      host_routes: [{"nexthop": "10.11.200.253", "destination": "192.168.100.0/24"}]
+
+  # Connect an interface on the web tier network's subnet to the router
+  az2_router_interface:
+    type: OS::Neutron::RouterInterface
+    depends_on: [private_subnet_az2]
+    properties:
+      router_id: { get_param: ext_router_az2 }
+      subnet_id: { get_resource: private_subnet_az2 }
+
+  # Create a security group
+  server_security_group1:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: Apache
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 1
+          port_range_max: 65535
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: udp
+          port_range_min: 1
+          port_range_max: 65535
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+  # Create a security group
+  server_security_group2:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: LBaaS_AZ2
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 1
+          port_range_max: 65535
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: udp
+          port_range_min: 1
+          port_range_max: 65535
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+  # AZ 2 Load Balancer
+  LAMP_Demo_AZ2_LBaaS1:
+    type: FCX::ExpandableLoadBalancer::LoadBalancer
+    depends_on: [ server4,server2 ]
+    properties:
+      Subnets: [{get_resource: private_subnet_az2}]
+      Instances: [{get_resource: server4},{get_resource: server2}]
+      Listeners:
+      - {LoadBalancerPort: '6080',
+         InstancePort: '6080',
+         Protocol: 'HTTP',
+         InstanceProtocol: 'HTTP' }
+      HealthCheck: {Target: 'HTTP:6080/',
+                    HealthyThreshold: '3',
+                    UnhealthyThreshold: '5',
+                    Interval: '30',
+                    Timeout: '5'}
+      Version: 2014-09-30
+      Scheme: internal
+      LoadBalancerName: LBaaS1AZ2
+      SecurityGroups: [ {get_resource: server_security_group2} ]
+
+  # AZ 2 Load Balancer
+  LAMP_Demo_AZ2_LBaaS2:
+    type: FCX::ExpandableLoadBalancer::LoadBalancer
+    depends_on: [ server4,server2 ]
+    properties:
+      Subnets: [{get_resource: private_subnet_az2}]
+      Instances: [{get_resource: server4},{get_resource: server2}]
+      Listeners:
+      - {LoadBalancerPort: '8080',
+         InstancePort: '8080',
+         Protocol: 'HTTP',
+         InstanceProtocol: 'HTTP' }
+      HealthCheck: {Target: 'HTTP:8080/',
+                    HealthyThreshold: '3',
+                    UnhealthyThreshold: '5',
+                    Interval: '30',
+                    Timeout: '5'}
+      Version: 2014-09-30
+      Scheme: internal
+      LoadBalancerName: LBaaS2AZ2
+      SecurityGroups: [ {get_resource: server_security_group2} ]
+
+################### JumpBox  - AZ 2 ##############################################################################
+
+  # Create a new port for the server interface, assign an ip address and security group
+  jump-server-port:
+    type: OS::Neutron::Port
+    depends_on: [ server_security_group1 ]
+    properties:
+      availability_zone: { get_param: az2 }
+      network_id: { get_resource: private_net_az2 }
+      security_groups: [{ get_resource: server_security_group1 }]
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet_az2 }
+          ip_address: '10.11.200.5'
+
+  # Allocate a floating/global ip address
+  jump-server-floating-ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      availability_zone: { get_param: az2 }
+      floating_network_id: { get_param: public_net_az2 }
+
+  # Assign a floating/global ip address to the fixed server ip address
+  jump-server-floating-ip-association:
+    type: OS::Neutron::FloatingIPAssociation
+    depends_on: jump-server-floating-ip
+    properties:
+      floatingip_id: { get_resource: jump-server-floating-ip }
+      port_id: { get_resource: jump-server-port }
+
+  # Create a system volume for use with the server
+  jump-sys-vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az2 }
+      name: "LBaaS-JumpBox-AZ2"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: image }
+
+  # Build a server using the system volume defined above
+  jump-server:
+    type: OS::Nova::Server
+    depends_on: [ jump-server-port ]
+    properties:
+      key_name: { get_param: key_az_2 }
+      image: { get_param: image }
+      flavor: "P-1"
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: jump-sys-vol}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "LBaaS-JumpBox-AZ2"
+      networks:
+        - port: { get_resource: jump-server-port }
+
+##########################################################################################################
+
+################### WebServers  - AZ 2 ##############################################################################
+
+  server2_port:
+    type: OS::Neutron::Port
+    depends_on: [ server_security_group1 ]
+    properties:
+      availability_zone: { get_param: az2 }
+      network_id: { get_resource: private_net_az2 }
+      security_groups: [{ get_resource: server_security_group1 }]
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet_az2 }
+          ip_address: '10.11.200.10'
+
+  # Create a system volume for use with the server
+  sys-vol2:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az2 }
+      name: "web-az2-boot-vol"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: image }
+
+  # Build a server using the system volume defined above
+  server2:
+    type: OS::Nova::Server
+    depends_on: [ jump-server,server2_port,sys-vol2 ]
+    properties:
+      key_name: { get_param: key_az_2 }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: sys-vol2}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "Apache-AZ2"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            mkdir /home/ubuntu/webapp1
+            echo "Hello from Webserver A Port 8080" > /home/ubuntu/webapp1/index.html
+            cd /home/ubuntu/webapp1
+            python -m SimpleHTTPServer 8080 &
+            mkdir /home/ubuntu/webapp2
+            echo "Hello from Webserver A Port 6080" > /home/ubuntu/webapp2/index.html
+            cd /home/ubuntu/webapp2
+            python -m SimpleHTTPServer 6080 &
+          params:
+            message: "Installation Complete"
+      networks:
+        - port: { get_resource: server2_port }
+
+###########################################################################################################
+
+################### DatabaseServers - AZ 2 ################################################################
+
+  # Create a new port for the server interface, assign an ip address and security group
+  server4_port:
+    type: OS::Neutron::Port
+    depends_on: [ server_security_group1 ]
+    properties:
+      availability_zone: { get_param: az2 }
+      network_id: { get_resource: private_net_az2 }
+      security_groups: [{ get_resource: server_security_group1 }]
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet_az2 }
+          ip_address: '10.11.200.30'
+
+  # Create a system volume for use with the server
+  sys-vol4:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az2 }
+      name: "db-az2-boot-vol"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: image }
+
+  # Build a server using the system volume defined above
+  server4:
+    type: OS::Nova::Server
+    depends_on: [ jump-server,server4_port,sys-vol4 ]
+    properties:
+      key_name: { get_param: key_az_2 }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: sys-vol4}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "Database-AZ2"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            mkdir /home/ubuntu/webapp1
+            echo "Hello from Webserver B Port 8080" > /home/ubuntu/webapp1/index.html
+            cd /home/ubuntu/webapp1
+            python -m SimpleHTTPServer 8080 &
+            mkdir /home/ubuntu/webapp2
+            echo "Hello from Webserver B Port 6080" > /home/ubuntu/webapp2/index.html
+            cd /home/ubuntu/webapp2
+            python -m SimpleHTTPServer 6080 &
+          params:
+            message: "Installation Complete"
+      networks:
+        - port: { get_resource: server4_port }
+
+###########################################################################################################
+
+
+
+
