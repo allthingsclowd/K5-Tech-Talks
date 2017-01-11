@@ -1,0 +1,602 @@
+heat_template_version: 2013-05-23
+# Author: Graham Land
+# Date: 09/01/2017
+# Website: https//allthingscloud.eu
+# Purpose: Template to demonstrate the basic format/usage of HOT multi-tier stack on our K5 platform
+
+description: K5 Tech Talks - Example Multi-Tier Network 
+
+# Input parameters
+parameters:
+  ubuntuimage:
+    type: string
+    label: Image name or ID
+    description: Image to be used for server. Please use an Ubuntu based image.
+    default: "Ubuntu Server 14.04 LTS (English) 01"
+  red_image:
+    type: string
+    label: Image name or ID
+    description: Redhat 7.2 image to be used for compute instance
+    default: "Red Hat Enterprise Linux 7.2 64bit (English) 01"
+  win_image:
+    type: string
+    label: Image name or ID
+    description: Windows Server 2012 R2 SE image to be used for compute instance
+    default: "Windows Server 2012 R2 SE 64bit (English) 01"
+  public_net:
+    type: string
+    label: external network ID
+    description: Public network
+    default: "d730db50-0e0c-4790-9972-1f6e2b8c4915"
+  flavor:
+    type: string
+    label: Flavor
+    description: Type of instance (flavor) to be used
+    default: "P-1"
+  default-sshkey:
+    type: string
+    label: Key name
+    description: Name of key-pair to be used for compute instance
+    default: "demostack"
+  public_net:
+    type: string
+    label: external network ID
+    description: Public network
+    default: "d730db50-0e0c-4790-9972-1f6e2b8c4915"
+  web_tier_network:
+    type: string
+    label: Web Tier L2 Network
+    description: Web Tier Network to attach instance to.
+    default: "WEB-NET"
+  web_tier_cidr:
+    type: string
+    label: Private network name or ID
+    description: Network to attach instance to.
+    default: "172.16.20.0/24"
+  web_tier_pool_start:
+    type: string
+    label: web_tier_network dhcp pool start address
+    description: Start of DHCP range
+    default: "172.16.20.10"
+  web_tier_pool_end:
+    type: string
+    label: web_tier_network dhcp pool end address
+    description: End of DHCP range
+    default: "172.16.20.49"
+  web_static_ip:
+    type: string
+    label: web server static ip address
+    description: static ip for instance
+    default: "172.16.20.50"
+  app_tier_network:
+    type: string
+    label: Application Tier L2 Network
+    description: Web Tier Network to attach instance to.
+    default: "APP-NET"
+  app_tier_cidr:
+    type: string
+    label: Private network name or ID
+    description: Network to attach instance to.
+    default: "10.10.10.0/24"
+  app_tier_pool_start:
+    type: string
+    label: app_tier_network dhcp pool start address
+    description: Start of DHCP range
+    default: "10.10.10.10"
+  app_tier_pool_end:
+    type: string
+    label: app_tier_network dhcp pool end address
+    description: End of DHCP range
+    default: "10.10.10.49"
+  app_static_ip:
+    type: string
+    label: app server static ip address
+    description: static ip for instance
+    default: "10.10.10.50"
+  db_tier_network:
+    type: string
+    label: DB Tier L2 Network
+    description: Database Tier Network to attach instance to.
+    default: "DB-NET"
+  db_tier_cidr:
+    type: string
+    label: Database Tier Network
+    description: Database Network to attach instance to.
+    default: "192.168.1.0/24"
+  db_tier_pool_start:
+    type: string
+    label: db_tier_network dhcp pool start address
+    description: Start of DHCP range
+    default: "192.168.1.10"
+  db_tier_pool_end:
+    type: string
+    label: db_tier_network dhcp pool end address
+    description: End of DHCP range
+    default: "192.168.1.49"
+  db_static_ip:
+    type: string
+    label: db server static ip address
+    description: static ip for instance
+    default: "192.168.1.50"       
+  az:
+    type: string
+    label: Availability Zone
+    description: Region AZ to use
+    default: "uk-1b"
+  externalrouter:
+    type: string
+    label: web tier router
+    description: Router with external access for global ip allocation
+    default: "f0dd5688-ec45-4b26-a3d8-0d69032cf569"
+
+   
+
+# K5 Infrastructure resources to be built
+resources:
+
+  # Create the web tier network
+  web_tier_net:
+    type: OS::Neutron::Net
+    properties:
+      availability_zone: { get_param: az }
+      name: { get_param: web_tier_network }
+
+  # Create a new web tier subnet on the web tier network
+  web_tier_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: web_tier_net
+    properties:
+      availability_zone: { get_param: az }
+      name: WEB_SUBNET
+      network_id: { get_resource: web_tier_net }
+      cidr: { get_param: web_tier_cidr }
+      gateway_ip: "172.16.20.1"
+      allocation_pools:
+        - start: { get_param: web_tier_pool_start }
+          end: { get_param: web_tier_pool_end }
+      host_routes: [{"nexthop": "172.16.20.254", "destination": "192.168.1.0/24"}, {"nexthop": "172.16.20.254", "destination": "10.10.10.0/24"}]     
+      dns_nameservers:
+        - "8.8.8.8"
+
+  # Create a port for the downlink router interface, assign an ip address  
+  web_downlink_port:
+    type: OS::Neutron::Port
+    depends_on: [ web_tier_subnet ]
+    properties:
+      availability_zone: { get_param: az }
+      network_id: { get_resource: web_tier_net }
+      fixed_ips:
+        - subnet_id: { get_resource: web_tier_subnet }
+          ip_address: "172.16.20.254"
+
+  # Create a port for the web server interface, assign an ip address  
+  web_server_static_port:
+    type: OS::Neutron::Port
+    depends_on: [ web_tier_subnet, web_security_group ]
+    properties:
+      availability_zone: { get_param: az }
+      network_id: { get_resource: web_tier_net }
+      security_groups: [{ get_resource: web_security_group }]
+      fixed_ips:
+        - subnet_id: { get_resource: web_tier_subnet }
+          ip_address: "172.16.20.50"
+
+  # Allocate a floating/global ip address
+  web_floating_ip:
+    type: OS::Neutron::FloatingIP
+    depends_on: [web_server_static_port]
+    properties:
+      availability_zone: { get_param: az }
+      floating_network_id: { get_param: public_net }
+
+  # Assign a floating/global ip address to the fixed server ip address
+  web_floating_ip_association:
+    type: OS::Neutron::FloatingIPAssociation
+    depends_on: [ web_floating_ip ]
+    properties:
+      floatingip_id: { get_resource: web_floating_ip }
+      port_id: { get_resource: web_server_static_port }
+
+  # Create the app tier network
+  app_tier_net:
+    type: OS::Neutron::Net
+    properties:
+      availability_zone: { get_param: az }
+      name: { get_param: app_tier_network }
+
+  # Create a new app tier subnet on the app tier network
+  app_tier_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: app_tier_net
+    properties:
+      availability_zone: { get_param: az }
+      name: "APP_SUBNET"
+      network_id: { get_resource: app_tier_net }
+      cidr: { get_param: app_tier_cidr }
+      gateway_ip: "10.10.10.1"
+      allocation_pools:
+        - start: { get_param: app_tier_pool_start }
+          end: { get_param: app_tier_pool_end }
+      host_routes: [{"nexthop": "10.10.10.254", "destination": "192.168.1.0/24"}]     
+      dns_nameservers:
+        - "8.8.8.8"
+
+  # Create a port for the downlink router interface, assign an ip address  
+  app_downlink_port:
+    type: OS::Neutron::Port
+    depends_on: [ app_tier_subnet ]
+    properties:
+      availability_zone: { get_param: az }
+      network_id: { get_resource: app_tier_net }
+      fixed_ips:
+        - subnet_id: { get_resource: app_tier_subnet }
+          ip_address: "10.10.10.254"
+
+  # Create a port for the downlink router interface, assign an ip address  
+  app_server_static_port:
+    type: OS::Neutron::Port
+    depends_on: [ app_tier_subnet, app_security_group ]
+    properties:
+      availability_zone: { get_param: az }
+      network_id: { get_resource: app_tier_net }
+      security_groups: [{ get_resource: app_security_group }]
+      fixed_ips:
+        - subnet_id: { get_resource: app_tier_subnet }
+          ip_address: "10.10.10.50"
+
+  # Create the db tier network
+  db_tier_net:
+    type: OS::Neutron::Net
+    properties:
+      availability_zone: { get_param: az }
+      name: "DB-NET"
+
+  # Create a new db tier subnet on the db tier network
+  db_tier_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: db_tier_net
+    properties:
+      availability_zone: { get_param: az }
+      name: "DB_SUBNET"
+      network_id: { get_resource: db_tier_net }
+      cidr: { get_param: db_tier_cidr }
+      gateway_ip: "192.168.1.1"
+      allocation_pools:
+        - start: { get_param: db_tier_pool_start }
+          end: { get_param: db_tier_pool_end }
+      dns_nameservers:
+        - "8.8.8.8"
+
+  # Create a port for the downlink router interface, assign an ip address  
+  db_server_static_port:
+    type: OS::Neutron::Port
+    depends_on: [ db_tier_subnet ]
+    properties:
+      availability_zone: { get_param: az }
+      network_id: { get_resource: db_tier_net }
+      security_groups: [{ get_resource: db_security_group }]
+      fixed_ips:
+        - subnet_id: { get_resource: db_tier_subnet }
+          ip_address: "192.168.1.50"
+
+  # Connect an interface on the web tier network's subnet to the external network router
+  web_router_interface:
+    type: OS::Neutron::RouterInterface
+    depends_on: [web_tier_subnet]
+    properties:
+      router_id: { get_param: externalrouter }
+      subnet_id: { get_resource: web_tier_subnet }     
+
+  # Create APP-R router
+  app_router:
+    type: OS::Neutron::Router
+    depends_on: app_tier_subnet
+    properties:
+      availability_zone: { get_param: az }
+      name: "APP-R"
+
+  # Connect an interface on the app network's subnet to the router
+  app_router_interface1:
+    type: OS::Neutron::RouterInterface
+    depends_on: [ app_router,app_tier_subnet ]
+    properties:
+      router_id: { get_resource: app_router }
+      subnet_id: { get_resource: app_tier_subnet }
+
+  # Connect an interface on the web subnet to the app router
+  app_router_interface2:
+    type: OS::Neutron::RouterInterface
+    depends_on: [ app_router,web_downlink_port ]
+    properties:
+      router_id: { get_resource: app_router }
+      port_id: { get_resource: web_downlink_port }
+
+  # Create DB-R router
+  db_router:
+    type: OS::Neutron::Router
+    depends_on: [ db_tier_subnet ]
+    properties:
+      availability_zone: { get_param: az }
+      name: "DB-R"
+
+  # Connect an interface on the private network's subnet to the router
+  db_router_interface1:
+    type: OS::Neutron::RouterInterface
+    depends_on: [ db_router,db_tier_subnet ]
+    properties:
+      router_id: { get_resource: db_router }
+      subnet_id: { get_resource: db_tier_subnet }
+
+  # Connect an interface on the private network's subnet to the router
+  db_router_interface2:
+    type: OS::Neutron::RouterInterface
+    depends_on: [ app_downlink_port,db_router ]
+    properties:
+      router_id: { get_resource: db_router }
+      port_id: { get_resource: app_downlink_port }
+
+   # Create a security group
+  web_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: "WEB-SG"
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: udp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+   # Create a security group
+  app_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: "APP-SG"
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: udp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+  # Create a security group
+  db_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: "DB-SG"
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: udp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+  # Create a security group
+  jmpbox_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Add security group rules for server
+      name: "JMPBOX-SG"
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 3389
+          port_range_max: 3389
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+
+  # Add Web Server
+
+  # Create a data volume for use with the server
+  data_vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      description: Data volume
+      name: "web-data-vol"
+      size: 3
+      volume_type: "M1"
+
+  # Create a system volume for use with the server
+  sys-vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      name: "web-boot-vol"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: ubuntuimage }
+
+  # Build a server using the system volume defined above
+  server:
+    type: OS::Nova::Server
+    depends_on: [ web_floating_ip_association ]
+    properties:
+      key_name: { get_param: default-sshkey }
+      image: { get_param: ubuntuimage }
+      flavor: { get_param: flavor }
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: sys-vol}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "WEB"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #cloud-config
+            write_files:
+              - content: |
+                  #!/bin/bash
+                  voldata_id=%voldata_id%
+                  voldata_dev="/dev/disk/by-id/virtio-$(echo ${voldata_id} | cut -c -20)"
+                  mkfs.ext4 ${voldata_dev}
+                  mkdir -pv /mnt/appdata
+                  echo "${voldata_dev} /mnt/appdata ext4 defaults 1 2" >> /etc/fstab
+                  mount /mnt/appdata
+                path: /tmp/format-disks
+                permissions: '0700'
+            runcmd:
+              - /tmp/format-disks
+          params:
+            "%voldata_id%": { get_resource: data_vol }
+
+      networks:
+        - port: { get_resource: web_server_static_port }
+
+  # Attach previously defined data-vol to the server
+  attach_vol_web:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: [ data_vol, server ]
+    properties:
+      instance_uuid: {get_resource: server}
+      mountpoint: "/dev/vdb"
+      volume_id: {get_resource: data_vol}
+
+  # Add App Server
+
+  # Create a data volume for use with the server
+  app_data_vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      description: Data volume
+      name: "app-data-vol"
+      size: 3
+      volume_type: "M1"
+
+  # Create a system volume for use with the server
+  app_sys-vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      name: "app-boot-vol"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: ubuntuimage }
+
+  # Build a server using the system volume defined above
+  app_server:
+    type: OS::Nova::Server
+    depends_on: [ app_sys-vol ]
+    properties:
+      key_name: { get_param: default-sshkey }
+      image: { get_param: ubuntuimage }
+      flavor: { get_param: flavor }
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: app_sys-vol}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "APP"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #cloud-config
+            write_files:
+              - content: |
+                  #!/bin/bash
+                  voldata_id=%voldata_id%
+                  voldata_dev="/dev/disk/by-id/virtio-$(echo ${voldata_id} | cut -c -20)"
+                  mkfs.ext4 ${voldata_dev}
+                  mkdir -pv /mnt/appdata
+                  echo "${voldata_dev} /mnt/appdata ext4 defaults 1 2" >> /etc/fstab
+                  mount /mnt/appdata
+                path: /tmp/format-disks
+                permissions: '0700'
+            runcmd:
+              - /tmp/format-disks
+          params:
+            "%voldata_id%": { get_resource: app_data_vol }
+
+      networks:
+        - port: { get_resource: app_server_static_port }
+
+  # Attach previously defined data-vol to the server
+  attach_vol_app:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: [ app_data_vol, app_server ]
+    properties:
+      instance_uuid: {get_resource: app_server}
+      mountpoint: "/dev/vdb"
+      volume_id: {get_resource: app_data_vol}
+
+ # Add DB Server
+   # Create a data volume for use with the server
+  db_data_vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      description: Data volume
+      name: "db-data-vol"
+      size: 3
+      volume_type: "M1"
+
+  # Create a system volume for use with the server
+  db_sys-vol:
+    type: OS::Cinder::Volume
+    properties:
+      availability_zone: { get_param: az }
+      name: "db-boot-vol"
+      size: 3
+      volume_type: "M1"
+      image : { get_param: ubuntuimage }
+
+  # Build a server using the system volume defined above
+  db_server:
+    type: OS::Nova::Server
+    depends_on: [ db_sys-vol ]
+    properties:
+      key_name: { get_param: default-sshkey }
+      image: { get_param: ubuntuimage }
+      flavor: { get_param: flavor }
+      admin_user: ubuntu
+      block_device_mapping: [{"volume_size": "3", "volume_id": {get_resource: db_sys-vol}, "delete_on_termination": True, "device_name": "/dev/vda"}]
+      name: "DB"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #cloud-config
+            write_files:
+              - content: |
+                  #!/bin/bash
+                  voldata_id=%voldata_id%
+                  voldata_dev="/dev/disk/by-id/virtio-$(echo ${voldata_id} | cut -c -20)"
+                  mkfs.ext4 ${voldata_dev}
+                  mkdir -pv /mnt/appdata
+                  echo "${voldata_dev} /mnt/appdata ext4 defaults 1 2" >> /etc/fstab
+                  mount /mnt/appdata
+                path: /tmp/format-disks
+                permissions: '0700'
+            runcmd:
+              - /tmp/format-disks
+          params:
+            "%voldata_id%": { get_resource: db_data_vol }
+
+      networks:
+        - port: { get_resource: db_server_static_port }
+
+  # Attach previously defined data-vol to the server
+  attach_vol_db:
+    type: OS::Cinder::VolumeAttachment
+    depends_on: [ db_data_vol, db_server ]
+    properties:
+      instance_uuid: {get_resource: db_server}
+      mountpoint: "/dev/vdb"
+      volume_id: {get_resource: db_data_vol}
+
+# Define values to be returned following a successful stack build
+outputs:
+  web_server_private_ip:
+    description: IP address of web server on private network
+    value: { get_attr: [ server, first_address ] }
+  web_server_public_ip:
+    description: Floating IP address of web server in public network
+    value: { get_attr: [ web_floating_ip, floating_ip_address ] }
